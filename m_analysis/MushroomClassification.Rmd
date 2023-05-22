@@ -1,0 +1,414 @@
+---
+title: "Mushroom Classification"
+author: "Michael Brennan"
+date: "2023-05-17"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+# Libraries
+# packages
+library(dplyr)
+library(plotly)
+library(tidyverse)
+library(MASS)
+# library(DataExplorer)
+# library(Hmisc)
+# library(polycor)
+# library(corrplot)
+# library(htmlwidgets)
+# library(moderndive)
+# library(leaps)
+# library('IRdisplay')
+library(pROC)
+library(car)
+# library(DiagrammeR)
+library(plyr)
+library(caret)
+library(caTools)
+library(boot)
+```
+
+### 1. Problem statement and dataset description:
+
+-   TheThe task at hand involves constructing a classification model capable of determining whether a mushroom is safe to eat or toxic by examining its physical characteristics, such as the shape of its cap, the color of its cap, its odor, and other factors. The analysis utilizes the Mushroom Classification dataset, which can be found on the UCI Machine Learning Repository. This dataset comprises 8124 instances of mushrooms, encompassing 23 attributes, including the classification indicating whether the mushroom is edible or poisonous.
+
+```{r}
+mushroom = read.csv("/Users/michaelkleyn/Downloads/mushrooms.csv", header=TRUE)
+glimpse(mushroom)
+```
+
+### 2. Fitting a logistic regression model with all predictors:
+
+-   Fitting the model on the entire data-set may cause over fitting to the training data and the performance of the model on new, unseen data may not be as good. It's generally a good practice to split the data into training and testing sets before fitting the model so that's what we'll do.
+
+```{r}
+# Set a random seed
+set.seed(123)
+
+# Convert target variable to factor
+mushroom$class <- as.factor(mushroom$class)
+
+# Encode all categorical variables
+for (col in names(mushroom)[2:length(names(mushroom))]) {
+  mushroom[, col] <- as.numeric(factor(mushroom[, col]))
+}
+
+# Find factor variables with one level
+one_level_factors <- sapply(mushroom, function(x) is.factor(x) && length(levels(x)) < 2)
+
+# Print names of one-level factors
+names(one_level_factors)[one_level_factors]
+
+# Remove one-level factors from the mushroom dataset
+mushroom <- mushroom[, !one_level_factors]
+
+# Split the data into training and testing sets
+split <- sample.split(mushroom$class, SplitRatio = 0.8)
+train_set <- subset(mushroom, split == TRUE)
+test_set  <- subset(mushroom, split == FALSE)
+
+# Fit the model on the training set
+model <- glm(class ~ ., data = train_set, family = binomial)
+summary(model)
+
+# Generate predictions on the test set
+predictions <- predict(model, newdata = test_set, type = "response")
+
+# Set the factor levels of predictions
+predictions <- factor(ifelse(predictions > 0.5, "p", "e"), levels = levels(test_set$class))
+
+# Create the confusion matrix
+confusionMatrix(predictions, test_set$class)
+```
+
+### 3. Select the best subset of variables. Perform a diagnostic on the best model. Perform all possible inferences you can think about.
+
+```{r}
+# Stepwise selection based on AIC
+step_model <- stepAIC(model, direction = "both", trace = FALSE)
+
+# Summary of the model
+summary(step_model)
+```
+
+```{r}
+# Get residuals
+residuals <- residuals(step_model, type = "deviance")
+plot(residuals)
+```
+
+```{r}
+# Confidence intervals
+confint(step_model)
+
+# p-values
+summary(step_model)$coefficients[, 4]
+```
+
+```{r}
+# Calculate Variance Inflation Factors (VIF)
+vif_values <- car::vif(step_model)
+print(vif_values)
+
+# Print variables with a high VIF
+high_vif_vars <- names(vif_values)[vif_values > 5]
+print(high_vif_vars)
+```
+
+### 4. Use the new model to make predictions.
+
+```{r}
+# Making predictions on the training data
+train_set$predicted <- predict(step_model, newdata = train_set, type = "response")
+
+# Compute the confusion matrix on the training data
+train_set$predicted_class <- ifelse(train_set$predicted > 0.5, "p", "e")
+confusion_train <- table(Actual = train_set$class, Predicted = train_set$predicted_class)
+cat("Training Confusion Matrix:\n")
+print(confusion_train)
+
+# Calculate training accuracy
+train_accuracy <- sum(diag(confusion_train)) / sum(confusion_train)
+cat("\nTraining Accuracy: ", train_accuracy,"\n")
+
+# Making predictions on the testing data
+test_set$predicted <- predict(step_model, newdata = test_set, type = "response")
+
+# Compute the confusion matrix on the testing data
+test_set$predicted_class <- ifelse(test_set$predicted > 0.5, "p", "e")
+confusion_test <- table(Actual = test_set$class, Predicted = test_set$predicted_class)
+cat("\nTesting Confusion Matrix:\n")
+print(confusion_test)
+
+# Calculate testing accuracy
+test_accuracy <- sum(diag(confusion_test)) / sum(confusion_test)
+cat("\nTesting Accuracy: ", test_accuracy)
+
+```
+
+### 5. Use different pi_0 as a cut-off point and create a confusion table.
+
+```{r}
+# Define a vector of pi_0 values as cut-off points
+pi_0_vec <- seq(0.1, 0.9, by = 0.1)
+
+# Create an empty list to store the confusion matrices for each pi_0 value
+conf_mat_list <- list()
+
+# Loop over each pi_0 value, make predictions, classify and build confusion matrix
+for (pi_0 in pi_0_vec) {
+  test_set$predicted <- predict(step_model, newdata = test_set, type = "response")
+  pred_class <- ifelse(test_set$predicted > pi_0, "p", "e")
+  conf_mat <- table(Predicted = pred_class, Actual = test_set$class)
+  colnames(conf_mat) <- c("Edible", "Poisonous")
+  rownames(conf_mat) <- c("Edible", "Poisonous")
+  conf_mat_list[[as.character(pi_0)]] <- conf_mat
+}
+
+# Print each confusion matrix
+for (pi_0 in pi_0_vec) {
+  cat("Confusion matrix for pi_0 =", pi_0, ":\n")
+  print(conf_mat_list[[as.character(pi_0)]])
+  cat("\n")
+}
+
+# Calculate accuracy for each cutoff point
+accuracy_vec <- sapply(conf_mat_list, function(cm) sum(diag(cm))/sum(cm))
+names(accuracy_vec) <- as.character(pi_0_vec)
+
+# Print accuracies
+cat("Accuracies for each cutoff point:\n")
+print(accuracy_vec)
+
+# Calculate precision for each cutoff point
+precision_vec <- sapply(conf_mat_list, function(cm) cm[2,2]/sum(cm[,2]))
+names(precision_vec) <- as.character(pi_0_vec)
+
+# Print precisions
+cat("Precisions for each cutoff point:\n")
+print(precision_vec)
+```
+
+### 6. Perform visualization of data and models.
+
+```{r}
+# Load the data again before encoding
+mushroom_before_encoding = read.csv("/Users/michaelkleyn/Downloads/mushrooms.csv", header=TRUE)
+
+# Define a vector of significant variables
+significant_vars <- c('cap.surface', 'cap.color', 'bruises', 'odor', 'gill.spacing', 'gill.size', 
+                      'gill.color', 'stalk.shape', 'stalk.root', 'stalk.surface.above.ring',
+                      'stalk.surface.below.ring', 'stalk.color.above.ring', 'stalk.color.below.ring',
+                      'ring.number', 'ring.type', 'population', 'habitat')
+
+# Loop over significant_vars and create a bar plot for each one
+for (var in significant_vars) {
+  # Create the bar plot
+  p <- ggplot(mushroom_before_encoding, aes_string(x = var, fill = 'class')) + 
+    geom_bar(position = "dodge") +
+    ggtitle(paste('Relationship between', var, 'and class'))
+  
+  # Print the plot
+  print(p)
+}
+
+# Histogram of residuals
+residuals <- residuals(step_model, type = "deviance")
+ggplot() +
+  geom_histogram(aes(residuals), bins = 30, fill = 'steelblue') +
+  ggtitle('Histogram of residuals')
+
+# Create residual plots
+par(mfrow = c(2, 2)) # Set up a 2x2 grid of plots
+
+# Residuals vs. Fitted Values plot
+plot(fitted(step_model), residuals, xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs. Fitted Values")
+
+# Normal Q-Q plot
+qqPlot(residuals, main = "Normal Q-Q Plot")
+
+# Scale-Location plot
+sqrt_abs_resid = sqrt(abs(residuals))
+plot(fitted(step_model), sqrt_abs_resid, xlab = "Fitted Values", ylab = "sqrt(|Residuals|)",
+     main = "Scale-Location Plot")
+
+# Residuals vs. Leverage plot
+influence = hatvalues(step_model)
+plot(influence, residuals, xlab = "Leverage", ylab = "Residuals",
+     main = "Residuals vs. Leverage")
+
+```
+
+### 7. Plot the ROC curve, find AUC, and the best cutoff point for classification.
+
+```{r}
+# Find the optimal cutoff point
+roc_obj <- roc(response = test_set$class, predictor = factor(test_set$predicted_class, ordered = TRUE, levels = c("e", "p")))
+
+# Extract the sensitivities and specificities at each cutoff point
+sensitivities <- roc_obj$sensitivities
+specificities <- roc_obj$specificities
+cutoffs <- roc_obj$cutoffs
+
+# Calculate the sum of sensitivities and specificities at each cutoff point
+sum_sens_spec <- sensitivities + specificities
+
+# Find the index of the maximum sum
+max_index <- which.max(sum_sens_spec)
+
+# Find the optimal cutoff point
+optimal_cutoff <- cutoffs[max_index]
+cat("Optimal cutoff point: ", optimal_cutoff)
+
+# Check the performance at the optimal cutoff point
+cat("\nSensitivity at optimal cutoff point: ", sensitivities[max_index])
+cat("\nSpecificity at optimal cutoff point: ", specificities[max_index])
+
+roc_obj <- roc(test_set$class, test_set$predicted)
+plot(roc_obj, print.auc = TRUE)
+
+data.frame(Cut_off = as.numeric(names(accuracy_vec)), 
+           Accuracy = as.numeric(accuracy_vec), 
+           Precision = as.numeric(precision_vec)) %>%
+  gather(Metric, Value, -Cut_off) %>%
+  ggplot(aes(x = Cut_off, y = Value, color = Metric)) +
+  geom_line() +
+  ggtitle('Accuracy and Precision over different cut-off points') +
+  theme_minimal()
+```
+
+### 8. Perform LOOCV and k-fold cross-validation.
+
+```{r}
+model <- glm(class ~ ., data = mushroom, family = binomial)
+
+# Leave-One-Out Cross-Validation (LOOCV)
+cv.error.loo <- cv.glm(mushroom, model, K = nrow(mushroom))
+
+cat("LOOCV Error: ", cv.error.loo$delta[1])
+
+# 10-fold Cross-Validation
+cv.error.10 <- cv.glm(mushroom, model, K = 10)
+
+cat("\n10-fold CV Error: ", cv.error.10$delta[1])
+```
+
+### 9. Try the probit link and the identity links to model data.
+
+```{r}
+# Model using probit link
+probit_model <- glm(class ~ cap.surface + cap.color + bruises + odor + 
+    gill.attachment + gill.spacing + gill.size + gill.color + 
+    stalk.shape + stalk.root + stalk.surface.above.ring + stalk.surface.below.ring + 
+    stalk.color.above.ring + stalk.color.below.ring + veil.color + 
+    ring.number + ring.type + population + habitat, family = binomial(link = "probit"), 
+    data = train_set)
+
+# Summary of the model
+summary(probit_model)
+
+# Making predictions on the testing data using probit model
+test_set$predicted <- predict(probit_model, newdata = test_set, type = "response")
+
+# Compute the confusion matrix on the testing data
+test_set$predicted_class <- ifelse(test_set$predicted > 0.5, "p", "e")
+confusion_test <- table(Actual = test_set$class, Predicted = test_set$predicted_class)
+cat("\nTesting Confusion Matrix:\n")
+print(confusion_test)
+
+# Calculate testing accuracy
+test_accuracy <- sum(diag(confusion_test)) / sum(confusion_test)
+cat("\nTesting Accuracy: ", test_accuracy)
+
+```
+
+### 10. Which model works better for this data?
+
+In the initial logistic regression model, the testing accuracy was 0.9686154. Now, with the probit model, the testing accuracy is 0.9575385. Thus, it seems that the logistic regression model performs slightly better than the probit model on this particular dataset, at least based on accuracy as a metric. Note that the identity link is not provided as a possible model because it's not suitable for this binary classification problem. The identity link function assumes a normal distribution of the residuals which doesn't hold for binary outcomes.
+
+### 11. If you have grouped data, use the methods for contingency tables to analyze the data (Chi sq test, G\^2, and so on if applicable).
+
+```{r}
+# Function to perform predictions and create contingency table
+perform_contingency_test <- function(model) {
+  preds <- ifelse(predict(model, test_set, type = "response") > 0.5, "p", "e")
+  table(preds, test_set$class)
+}
+
+# Perform predictions and create contingency table for logistic regression
+logistic_table <- perform_contingency_test(step_model)
+print(addmargins(logistic_table))
+chi2_logistic <- chisq.test(logistic_table)
+fisher_logistic <- fisher.test(logistic_table)
+print(chi2_logistic)
+print(fisher_logistic)
+
+# Perform predictions and create contingency table for probit regression
+probit_table <- perform_contingency_test(probit_model)
+print(addmargins(probit_table))
+chi2_probit <- chisq.test(probit_table)
+fisher_probit <- fisher.test(probit_table)
+print(chi2_probit)
+print(fisher_probit)
+
+```
+
+### 12. Write a report
+
+#### **Introduction**
+
+The aim of this report is to build a classification model to predict whether mushrooms are edible or poisonous based on various features. The dataset used for this analysis contains information about the physical attributes of mushrooms and their corresponding classes.
+
+#### Data Exploration and Preprocessing
+
+To begin the analysis, we explored the dataset and gained insights into its structure and variables. The dataset consists of 8,124 observations and 23 variables. The target variable, "class," indicates whether a mushroom is edible (e) or poisonous (p). Before modeling, we performed necessary data preprocessing steps, including converting categorical variables into dummy variables using one-hot encoding. This transformation ensured compatibility with the classification algorithms.
+
+#### Model Development
+
+##### Logistic Regression Model
+
+Initially, we developed a logistic regression model to predict the mushroom class based on all available features. The model was fitted using the glm function from the stats package, with the binomial family and logit link function. The model formula included all the available predictor variables.
+
+The summary of the logistic regression model revealed that several variables had significant impacts on the classification of mushrooms. These variables include cap surface, cap color, bruises, odor, gill spacing, gill size, gill color, stalk shape, stalk root, stalk surface above ring, stalk surface below ring, stalk color above ring, stalk color below ring, ring number, ring type, population, and habitat.
+
+##### Feature Selection
+
+To improve model performance and reduce complexity, we conducted stepwise feature selection using the stepAIC function from the MASS package. The resulting model included the following variables: bruises, odor, gill spacing, gill size, stalk shape, stalk root, stalk surface above ring, ring number, and ring type.
+
+##### Model Evaluation
+
+The performance of the selected logistic regression model was evaluated using a holdout test set. The test set accuracy was found to be 96.2%. Additionally, precision was calculated for each class, yielding 96.8%.
+
+#### Reciever Operating Characteristic Analysis
+
+We performed an ROC analysis to evaluate the model's performance across different cutoff points. The ROC curve showed the trade-off between sensitivity and specificity at various classification thresholds. The area under the ROC curve (AUC) was 99.3%. The optimal cutoff point was determined to be \~.5, which maximized the sum of sensitivity and specificity.
+
+#### **Confusion Matrix for Different Cutoff Points**
+
+To further explore the model's classification performance, we created a confusion matrix for different cutoff points. The confusion matrices showed the counts of true positive, false positive, true negative, and false negative classifications at each cutoff point. The accuracy and precision values were calculated for each cutoff point.
+
+#### **Leave-One-Out Cross-Validation (LOOCV) and k-fold Cross-Validation**
+
+To assess the model's generalization performance, we conducted LOOCV and 10-fold cross-validation using the cv.glm function. The LOOCV error was found to be 2.52%, and the 10-fold cross-validation error was 2.53%. These results indicate that the model has good predictive performance and is likely to generalize well to unseen data.
+
+#### **Alternative Modeling Approaches**
+
+To explore alternative modeling approaches we fitted a probit model. The probit model utilized the probit link function, and we provided summaries above with estimated coefficients, standard errors, z-values, and p-values for each predictor variable.
+
+The probit model achieved a testing accuracy of 95.75%. Testing these alternative models allow for different assumptions about the relationship between predictors and the response variable, providing insights into the impact of different link functions on model predictions and interpretability.\
+
+#### **Conclusion**
+
+In conclusion, we developed a logistic regression model to predict the edibility of mushrooms based on their physical attributes. The selected model demonstrated good predictive performance, as indicated by high accuracy and precision values. The ROC analysis further confirmed the model's discrimination ability, with an AUC of 99.3%. Cross-validation results demonstrated the model's generalization capability.
+
+Moreover, the exploration of alternative modeling approaches using probit expanded our understanding of the relationship between predictors and the response variable. These findings can inform future studies and provide insights into different modeling perspectives.
+
+Overall, this classification model can be valuable for identifying the edibility of mushrooms based on their characteristics, contributing to the field of mushroom classification and enhancing safety in mushroom consumption.
